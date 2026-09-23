@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Job Processing — Dead Letter Queue</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --panel: #171b26;
+      --border: #2a3040;
+      --text: #dde3f0;
+      --muted: #8a93a6;
+      --accent: #4f8cff;
+      --dead: #ff5d6c;
+      --ok: #3ddc84;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+      font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin-bottom: 20px; }
+    .stats { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+    .stat {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px 16px; color: var(--muted);
+    }
+    .stat b { color: var(--text); font-size: 18px; display: inline-block; margin-left: 6px; }
+    .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; }
+    label { color: var(--muted); }
+    select, input {
+      background: var(--panel); color: var(--text); border: 1px solid var(--border);
+      border-radius: 6px; padding: 6px 10px;
+    }
+    button {
+      background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+      padding: 7px 14px; cursor: pointer; font-size: 13px;
+    }
+    button:hover { filter: brightness(1.1); }
+    button:disabled { opacity: .5; cursor: default; }
+    table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 8px; overflow: hidden; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+    tr:last-child td { border-bottom: 0; }
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 10px;
+      font-size: 12px; text-transform: uppercase;
+    }
+    .badge.dead { background: rgba(255,93,108,.15); color: var(--dead); }
+    .badge.succeeded, .badge.pending { background: rgba(61,220,132,.12); color: var(--ok); }
+    .badge.processing { background: rgba(79,140,255,.15); color: var(--accent); }
+    .badge.failed { background: rgba(255,180,70,.15); color: #ffb646; }
+    pre {
+      margin: 0; max-height: 160px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+      background: #0b0d13; border: 1px solid var(--border); border-radius: 6px; padding: 8px;
+      color: var(--muted); font-size: 12px;
+    }
+    .empty { color: var(--muted); text-align: center; padding: 40px; }
+    .error { color: var(--dead); margin: 8px 0; }
+    .env-muted { color: var(--muted); font-size: 12px; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <h1>Dead Letter Queue</h1>
+  <div class="sub">Background job processing console — dead jobs, payloads, error logs, and manual retries.</div>
+
+  <div class="stats">
+    <div class="stat">dead <b id="stat-dead">–</b></div>
+    <div class="stat">processing <b id="stat-processing">–</b></div>
+    <div class="stat">pending <b id="stat-pending">–</b></div>
+    <div class="stat">succeeded <b id="stat-succeeded">–</b></div>
+    <div class="stat">failed <b id="stat-failed">–</b></div>
+  </div>
+
+  <div class="controls">
+    <label>status</label>
+    <select id="status-filter">
+      <option value="dead">dead</option>
+      <option value="pending">pending</option>
+      <option value="processing">processing</option>
+      <option value="failed">failed</option>
+      <option value="succeeded">succeeded</option>
+    </select>
+    <label>auto-refresh</label>
+    <select id="refresh-interval">
+      <option value="0">off</option>
+      <option value="3000">3s</option>
+      <option value="5000">5s</option>
+      <option value="10000">10s</option>
+    </select>
+    <button id="refresh">Refresh</button>
+  </div>
+
+  <div id="list"><div class="empty">Loading…</div></div>
+
+  <script>
+    const listEl = document.getElementById('list');
+    const statusEl = document.getElementById('status-filter');
+    const refreshEl = document.getElementById('refresh-interval');
+    let timer = null;
+
+    async function api(url, opts) {
+      const res = await fetch(url, opts);
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || res.statusText);
+      return body;
+    }
+
+    function esc(value) {
+      return String(value === undefined || value === null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    async function loadStats() {
+      try {
+        const { counts } = await api('/api/jobs/counts');
+        document.getElementById('stat-dead').textContent = counts.dead;
+        document.getElementById('stat-processing').textContent = counts.processing;
+        document.getElementById('stat-pending').textContent = counts.pending;
+        document.getElementById('stat-succeeded').textContent = counts.succeeded;
+        document.getElementById('stat-failed').textContent = counts.failed;
+      } catch (err) {
+        console.warn('stats error:', err.message);
+      }
+    }
+
+    async function load() {
+      const status = statusEl.value;
+      try {
+        const data = await api(`/api/jobs?status=${encodeURIComponent(status)}&limit=100`);
+        renderRows(data.jobs);
+        loadStats();
+      } catch (err) {
+        listEl.innerHTML = `<div class="error">${esc(err.message)}</div>`;
+      }
+    }
+
+    function renderRows(jobs) {
+      if (jobs.length === 0) {
+        listEl.innerHTML = '<div class="empty">No jobs with this status.</div>';
+        return;
+      }
+      const rows = jobs.map((job) => {
+        const payload = esc(JSON.stringify(job.payload ?? {}, null, 2));
+        const error = job.lastError ? esc(job.lastError) : '<span class="env-muted">—</span>';
+        const button =
+          job.status === 'dead' || job.status === 'failed'
+            ? `<button class="retry" data-id="${job.id}">Retry</button>`
+            : '';
+        return `<tr>
+          <td class="env-muted">${esc(job.id)}<br/><span class="badge ${job.status}">${job.status}</span></td>
+          <td><b>${esc(job.type)}</b><br/><span class="env-muted">attempts ${job.attempts}/${job.maxAttempts}</span></td>
+          <td><pre>${payload}</pre></td>
+          <td><pre>${error}</pre></td>
+          <td class="env-muted">
+            run: ${esc(formatTs(job.runAt))}<br/>
+            started: ${esc(formatTs(job.startedAt))}<br/>
+            finished: ${esc(formatTs(job.finishedAt))}
+          </td>
+          <td>${button}</td>
+        </tr>`;
+      }).join('');
+      listEl.innerHTML =
+        '<table><thead><tr>' +
+        '<th>id / status</th><th>type</th><th>payload</th><th>last error</th><th>timestamps</th><th>action</th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
+    function formatTs(ts) {
+      if (!ts) return '—';
+      return new Date(ts).toLocaleString();
+    }
+
+    listEl.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button.retry');
+      if (!btn) return;
+      btn.disabled = true;
+      try {
+        const result = await api(`/api/jobs/${btn.dataset.id}/retry`, { method: 'POST' });
+        console.log('requeued', result.job.id);
+      } catch (err) {
+        alert(err.message);
+      }
+      load();
+    });
+
+    statusEl.addEventListener('change', () => { load(); schedule(); });
+    refreshEl.addEventListener('change', schedule);
+    document.getElementById('refresh').addEventListener('click', load);
+
+    function schedule() {
+      if (timer) { clearInterval(timer); timer = null; }
+      const ms = Number(refreshEl.value);
+      if (ms > 0) timer = setInterval(load, ms);
+    }
+
+    load();
+    schedule();
+  </script>
+</body>
+</html>

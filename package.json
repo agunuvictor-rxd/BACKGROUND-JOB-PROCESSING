@@ -1,0 +1,20 @@
+{
+  "name": "background-job-processing",
+  "version": "1.0.0",
+  "description": "Async background job processing system with atomic claiming, backoff, and a dead-letter queue",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "worker": "node src/worker.js",
+    "db:init": "node src/db.js --init-only",
+    "demo": "node src/demo.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.22.3",
+    "pg": "^8.23.0"
+  }
+}
