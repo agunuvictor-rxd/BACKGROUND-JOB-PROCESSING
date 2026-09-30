@@ -168,7 +168,7 @@ button per job, and supports auto-refresh.
 
 ## Demo
 
-With the API and worker running:
+With the API and worker running run the command:
 
 ```bash
 npm run demo
